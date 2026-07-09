@@ -62,8 +62,8 @@ flowchart LR
 | File | Responsibility |
 |------|----------------|
 | `Main.py` | Entrypoint/router: login → resolve customer → build that customer's `st.navigation` page set |
-| `auth.py` | `require_login()` (username/password via `streamlit-authenticator`) + `resolve_tenant(email)` |
-| `tenants.py` | **Tenant registry** — `customer → {prefix, page set, per-page template params}` |
+| `auth.py` | `require_login()` + set/change password (bcrypt → Snowflake) + `resolve_tenant(email)` |
+| `tenants.py` | Loads the tenant registry from Snowflake `DASHBOARD_CUSTOMERS` (in-code fallback for local dev) |
 | `views.py` | Generic, tenant-parameterized dashboards (`product_performance`, `attendance`, `email_campaigns`) |
 | `sf_session.py` | Snowflake Snowpark session (key-pair / JWT auth) |
 | `scripts/create_user.py` | Hash a password (bcrypt) + print the `DASHBOARD_USERS` INSERT |
@@ -78,8 +78,10 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the login sequence, data-
 
 | Layer | Answers | Where it lives | Changes |
 |-------|---------|----------------|---------|
-| **Users / permissions** | *Who is this user (password), and which customer?* | Snowflake `DASHBOARD_USERS(EMAIL, NAME, PASSWORD_HASH, CUSTOMER, ACTIVE)` | Often (clients added/removed) |
-| **Template** | *What does that customer's dashboard look like?* | `tenants.py` registry (in code) | With releases |
+| **Users / permissions** | *Who is this user (password), and which customer?* | Snowflake `DASHBOARD_USERS(EMAIL, NAME, PASSWORD_HASH, CUSTOMER, INVITE_CODE, ACTIVE)` | Often (clients added/removed) |
+| **Template + data source** | *What does that customer see, and from which tables?* | Snowflake `DASHBOARD_CUSTOMERS(CUSTOMER, LABEL, PREFIX, PAGES, EMAIL_CONFIG)` | In Snowflake |
+
+Both control tables live in Snowflake, so adding/re-pointing a customer is inserts/updates — **no code deploy** (only brand-new *page types* need code).
 
 **Per-customer templates** are pure config. Example — Abbaye vs Rimrock use the *same* email code with different config:
 
@@ -87,6 +89,8 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the login sequence, data-
 - **Rimrock** → pre-deduped `RIMROCK_MANDRILL_NOTIFICATION_VIEW`, `EXTRA`/`SUBJECT` fields, buckets `30`/`60`/`90`
 
 Customers can also have **different page sets**. For a genuinely bespoke customer, a page key can point at a custom function in `views.py`.
+
+**Guest Portal & Audience (GA4):** these two pages are sourced from **Google Analytics (GA4)** — pulled via the Snowflake Connector for Google Analytics into a per-client `{PREFIX}_GA4` table (one connector report per grain, unioned). Data model is fully specified in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#4-data-model); these pages are pending connector setup (and the Most Clicked Slides dimension) and will render **with charts** to match Data Studio.
 
 ### Data-isolation guarantees
 - The customer is resolved **server-side from the authenticated email only** — never from URL params or UI controls.
@@ -101,16 +105,17 @@ Customers can also have **different page sets**. For a genuinely bespoke custome
 ```mermaid
 flowchart TD
     A[New customer onboarding] --> B[Confirm Snowflake tables exist<br/>PREFIX_REPORT_ITEMS, PREFIX_UVE_TRANSACTIONS_GROUPED, ...]
-    B --> C[Add entry in tenants.py<br/>prefix + pages + email cfg]
-    C --> D[Create users: scripts/create_user.py<br/>then INSERT into DASHBOARD_USERS]
-    D --> E[Deploy updated image]
-    E --> F[User logs in -> sees their dashboards]
+    B --> C[INSERT row into DASHBOARD_CUSTOMERS<br/>prefix + pages + email cfg]
+    C --> D[INSERT users into DASHBOARD_USERS<br/>email + customer + invite code]
+    D --> F[User sets password on first login -> sees dashboards]
 ```
 
 1. **Confirm data** — the customer's `PREFIX_*` tables exist in `SALES_ANALYTICS.PUBLIC`.
-2. **Register the tenant** — add a `TENANTS["customer"]` entry in `tenants.py`.
-3. **Create logins** — run `scripts/create_user.py` for each user (bcrypt-hashes the password) and run the printed `INSERT` into `DASHBOARD_USERS` with that user's `CUSTOMER`.
-4. **Deploy** the updated image. No new container, route, or auth provider needed.
+2. **Register the customer** — `INSERT` into `DASHBOARD_CUSTOMERS` (prefix, pages, email config).
+3. **Add users** — `INSERT` into `DASHBOARD_USERS` (email + customer, optional invite code). Each user sets their own password on first login (or use `scripts/create_user.py` to pre-hash one).
+4. **No code deploy** — it's all data. (A brand-new *page type* is the only thing that needs code.)
+
+**Passwords:** first-login set (email + invite code), sidebar "Change password" (current + new), and admin reset (`UPDATE DASHBOARD_USERS SET PASSWORD_HASH = NULL …`) — all store bcrypt hashes; see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#4-data-model).
 
 ---
 

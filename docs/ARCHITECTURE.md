@@ -106,44 +106,108 @@ the customer's code (`ABBAYE_`, `RIMROCK_`, `FAIRMONT_`, `CLL_`, `WHISTLER_`, `J
 | `_UVE_TRANSACTIONS_GROUPED` | Book Date (`T_TRANSDATE`) & Event Date (`TI_CALDATE`) |
 | `_MANDRILL_NOTIFICATIONS` / `_MANDRILL_NOTIFICATION_VIEW` | Email Campaigns |
 
-### Users / permissions table (to be created)
+Two control tables drive the whole app (create both):
 
+### `DASHBOARD_USERS` — who logs in, and which customer
 ```sql
 CREATE TABLE IF NOT EXISTS SALES_ANALYTICS.PUBLIC.DASHBOARD_USERS (
     EMAIL         VARCHAR NOT NULL,   -- login id (lowercased)
     NAME          VARCHAR,
-    PASSWORD_HASH VARCHAR NOT NULL,   -- bcrypt hash (see scripts/create_user.py)
-    CUSTOMER      VARCHAR NOT NULL,   -- must match a key in tenants.TENANTS
+    PASSWORD_HASH VARCHAR,            -- bcrypt hash; NULL until the user sets it
+    CUSTOMER      VARCHAR NOT NULL,   -- must match DASHBOARD_CUSTOMERS.CUSTOMER
+    INVITE_CODE   VARCHAR,            -- optional shared secret for first-time set-password
     ACTIVE        BOOLEAN DEFAULT TRUE,
     CREATED_AT    TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
 );
 ```
 
-Seed a user: `python scripts/create_user.py <email> "<Name>" <customer>` → prints the
-`INSERT` (with a bcrypt hash) to run in Snowflake.
-
-### Tenant registry (`tenants.py`)
-
-```python
-TENANTS["<customer>"] = {
-    "label":  "Display Name",
-    "prefix": "PREFIX",                     # -> PREFIX_REPORT_ITEMS, PREFIX_UVE_... etc.
-    "pages":  ["product_performance", "book_date", "event_date", "email_campaigns"],
-    "email":  {                             # per-customer Email Campaigns template
-        "table": "PREFIX_MANDRILL_NOTIFICATIONS",
-        "tag_field": "NOTIFICATION_TAG",    # or "EXTRA" for a view
-        "subject_field": "DATA_SUBJECT",    # or "SUBJECT"
-        "subject_match": "…",               # ILIKE scope (multi-property source)
-        "buckets": [("days:15", "Automatic Emails 15 days"), ...],
-    },
-}
+### `DASHBOARD_CUSTOMERS` — each customer's data source + template
+```sql
+CREATE TABLE IF NOT EXISTS SALES_ANALYTICS.PUBLIC.DASHBOARD_CUSTOMERS (
+    CUSTOMER     VARCHAR NOT NULL,    -- e.g. 'abbaye'
+    LABEL        VARCHAR,
+    PREFIX       VARCHAR NOT NULL,    -- data source -> PREFIX_REPORT_ITEMS, PREFIX_UVE_TRANSACTIONS_GROUPED
+    PAGES        ARRAY,               -- which dashboards this customer sees
+    EMAIL_CONFIG VARIANT,             -- per-customer Email Campaigns template (table, tag/subject fields, buckets)
+    ACTIVE       BOOLEAN DEFAULT TRUE
+);
 ```
+
+`tenants.py` loads `DASHBOARD_CUSTOMERS` at runtime (cached, 5 min) and falls back to a
+small in-code registry only if the table is unavailable (local dev). `auth.py` loads
+`DASHBOARD_USERS`.
+
+### Password lifecycle (all write bcrypt hashes back to `DASHBOARD_USERS.PASSWORD_HASH`)
+- **Set (first login):** admin inserts a user with `PASSWORD_HASH` NULL (+ optional
+  `INVITE_CODE`); the user sets their password via the "Set password" form (email +
+  invite code + new password).
+- **Change (logged in):** the sidebar "Change password" form (current + new).
+- **Forgot (admin reset, no email):** `UPDATE DASHBOARD_USERS SET PASSWORD_HASH = NULL
+  WHERE LOWER(EMAIL) = …;` → the user re-sets on next login.
+
+`scripts/create_user.py` remains available to pre-hash a password for a direct INSERT.
+
+### GA4 data — Guest Portal & Audience (`{PREFIX}_GA4`)
+
+Guest Portal and Audience are sourced from **GA4 via the Snowflake Connector for Google
+Analytics** (aggregate). GA4's scope rules forbid mixing item-, event-, session-, and
+geo-scoped fields in one report, so the connector pulls **one report per grain** (each its
+own table), which are unioned into a single per-client `{PREFIX}_GA4` table tagged by
+`REPORT`.
+
+Connector reports (per client):
+
+| `REPORT` | Dimensions | Metrics | Powers |
+|---|---|---|---|
+| `items` | date, itemName | itemsViewed, itemsPurchased | Items Viewed / Purchased |
+| `events` | date, eventName, sessionSource, hostName | sessions, eventCount, keyEvents | Funnel, Transactions, Conversion Rate |
+| `daily` | date, sessionSource, hostName | sessions, activeUsers, totalUsers, newUsers, screenPageViews, engagedSessions, userEngagementDuration, keyEvents | Acquisition, Behavior, Sessions graph |
+| `device` | date, deviceCategory, hostName | sessions | Device Category |
+| `location` | date, city, country, region, sessionSource, hostName | sessions, keyEvents | Location |
+| `slides`* | date, eventName, linkUrl, linkText | eventCount | Most Clicked Slides |
+
+`itemName` is item-scoped, so the `items` report can't carry `sessionSource`/`hostName` —
+filter it via the connector's Filters option instead. All other reports carry the filter
+dimensions so the app can apply each widget's (differing) filters in-query.
+
+Union table (REPORT-tagged long table; each row fills only its report's columns):
+
+```sql
+CREATE TABLE IF NOT EXISTS SALES_ANALYTICS.PUBLIC.{PREFIX}_GA4 (
+    REPORT VARCHAR NOT NULL,                         -- items|events|daily|device|location|slides
+    DATE DATE,
+    ITEM_NAME VARCHAR, EVENT_NAME VARCHAR, DEVICE_CATEGORY VARCHAR,
+    CITY VARCHAR, COUNTRY VARCHAR, REGION VARCHAR,
+    LINK_URL VARCHAR, LINK_TEXT VARCHAR,             -- Most Clicked Slides (proxy for the venue)
+    SESSION_SOURCE VARCHAR, HOST_NAME VARCHAR,       -- filter dimensions
+    SESSIONS NUMBER, KEY_EVENTS NUMBER, ITEMS_VIEWED NUMBER, ITEMS_PURCHASED NUMBER,
+    EVENT_COUNT NUMBER, ACTIVE_USERS NUMBER, TOTAL_USERS NUMBER, NEW_USERS NUMBER,
+    SCREEN_PAGE_VIEWS NUMBER, ENGAGED_SESSIONS NUMBER, USER_ENGAGEMENT_DURATION FLOAT
+);
+```
+
+Filters (Exclude `sessionSource` contains tagassistant/uat/localhost/staging; Include
+`hostName` contains `booketing`; `location` also excludes `city = Morelia`; `device` uses
+the host filter only; `events` funnel filters `eventName` to the 5 funnel steps; `slides`
+filters `eventName` to `explore_slider_click`/`explore_sliders_externallink`).
+
+Ratios are **computed in the app**, not stored: Conversion Rate = `KEY_EVENTS/SESSIONS`;
+% New Users = `(TOTAL_USERS-NEW_USERS)/TOTAL_USERS`; Bounce Rate =
+`(SESSIONS-ENGAGED_SESSIONS)/SESSIONS`; Avg engagement = `USER_ENGAGEMENT_DURATION/SESSIONS`;
+Sessions per user = `SESSIONS/TOTAL_USERS`.
+
+\* **Most Clicked Slides is pending a dimension.** The venue breakdown is the custom event
+parameter "get venue selected" (`customEvent:<param>`), which the Snowflake GA connector
+does not expose. `linkUrl`/`linkText` are proxies for the external-link slider event —
+verify in a GA4 Explore that they carry the venue for both slide events, otherwise defer.
 
 ---
 
 ## 5. Roadmap
 
-- **Guest Portal** and **Audience** pages — sourced from **Google Analytics (GA4)** via
-  the GA4 Data API — added as new page keys in `views.py` + `tenants.py` once GA4 access
-  lands (DATA access ticket).
+- **Guest Portal** and **Audience** pages — data model defined above (GA4 via the Snowflake
+  Connector for Google Analytics → per-client `{PREFIX}_GA4`). Pending: create the per-grain
+  connector reports + the union view, resolve the Most Clicked Slides dimension, then add
+  the `guest_portal` + `audience` page keys to `views.py`/`tenants.py` (**charts on** for
+  these two, to match Data Studio).
 - `Dockerfile` on the GCP `base:v1.0` image, then hand off to INF-212 for hosting.
