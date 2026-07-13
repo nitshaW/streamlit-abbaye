@@ -100,6 +100,11 @@ flowchart LR
 All dashboards read `SALES_ANALYTICS.PUBLIC`, one table set per customer, prefixed by
 the customer's code (`ABBAYE_`, `RIMROCK_`, `FAIRMONT_`, `CLL_`, `WHISTLER_`, `JASPER_`).
 
+Every table and chart on every page exposes a **per-widget CSV download** (shared `_dl()`
+helper → `st.download_button` with a unique key). Chart exports carry the chart's exact
+underlying data (e.g. the daily sessions series, the funnel counts), not just the on-screen
+tables.
+
 | Suffix | Feeds |
 |--------|-------|
 | `_REPORT_ITEMS` | Product Performance (views, conversion, attendance, value) |

@@ -21,6 +21,11 @@ def _csv(df):
     return df.to_csv(index=False).encode("utf-8")
 
 
+def _dl(df, fname, key, label="⬇ Download data (CSV)"):
+    """Compact CSV download button (unique key required when several on one page)."""
+    st.download_button(label, data=_csv(df), file_name=fname, mime="text/csv", key=key)
+
+
 # ---------------------------------------------------------------- Product Performance
 @st.cache_data
 def _load_report_items(table):
@@ -197,14 +202,32 @@ def email_campaigns(cfg):
         _email_section(label, df[tag == tag_value])
     _email_section("Total Emails", df)
 
+    # Downloadable metrics summary: one row per bucket + total.
+    def _sum_row(name, d):
+        rec, sent, opened = int(d["DATA_ID"].count()), int(d["SENT"].sum()), int(d["OPEN"].sum())
+        clicks, data_clicks = int(d["CLICKS"].sum()), int(d["DATA_CLICKS"].sum())
+        return {"Segment": name, "Emails Sent": rec, "Delivered": sent, "Opened": opened,
+                "Data Clicks": data_clicks, "Emails w/ >=1 Click": clicks,
+                "Delivery Rate": f"{(sent / rec if rec else 0):.2%}",
+                "Open Rate": f"{(opened / sent if sent else 0):.2%}",
+                "CTR": f"{(clicks / sent if sent else 0):.2%}"}
+    summary = pd.DataFrame([_sum_row(label, df[tag == tag_value]) for tag_value, label in ec["buckets"]]
+                           + [_sum_row("Total", df)])
+    _dl(summary, "email_campaigns_summary.csv", "email_summary_dl",
+        label="⬇ Download metrics summary (CSV)")
+
     st.markdown("## 📊 General Data")
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("### 📧 Emails Sent")
-        st.dataframe(df.groupby("DATA_STATE").size().reset_index(name="Total"), use_container_width=True)
+        sent_tbl = df.groupby("DATA_STATE").size().reset_index(name="Total")
+        st.dataframe(sent_tbl, use_container_width=True)
+        _dl(sent_tbl, "email_sent_by_state.csv", "email_state_dl")
     with col2:
         st.markdown("### 🔄 Open Frequency")
-        st.dataframe(df.groupby("DATA_OPENS").size().reset_index(name="Total"), use_container_width=True)
+        freq_tbl = df.groupby("DATA_OPENS").size().reset_index(name="Total")
+        st.dataframe(freq_tbl, use_container_width=True)
+        _dl(freq_tbl, "email_open_frequency.csv", "email_freq_dl")
 
 
 # ---------------------------------------------------------------- GA4: Guest Portal + Audience
@@ -299,13 +322,16 @@ def guest_portal(cfg):
     c[4].metric("Avg Engagement", f"{(eng_dur / sessions if sessions else 0):.0f}s")
 
     st.subheader("Sessions over time")
-    st.line_chart(daily.groupby(daily["DATE"].dt.date)["SESSIONS"].sum().rename("Sessions"))
+    ts = daily.groupby(daily["DATE"].dt.date)["SESSIONS"].sum().rename("Sessions")
+    st.line_chart(ts)
+    _dl(ts.reset_index(), "guest_portal_sessions.csv", "gp_sessions_dl")
 
     st.subheader("Conversion funnel")
     totals = events.groupby("EVENTNAME")["EVENTCOUNT"].sum()
     funnel = pd.DataFrame({"Step": [lbl for _, lbl in _GA4_FUNNEL],
                            "Events": [int(totals.get(k, 0)) for k, _ in _GA4_FUNNEL]})
     st.bar_chart(funnel.set_index("Step"))
+    _dl(funnel, "guest_portal_funnel.csv", "gp_funnel_dl")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -314,6 +340,8 @@ def guest_portal(cfg):
                     .sort_values("ITEMSVIEWED", ascending=False).head(15))
         top.columns = ["Viewed", "Purchased"]
         st.bar_chart(top)
+        _dl(top.reset_index().rename(columns={"ITEMNAME": "Item"}),
+            "guest_portal_items.csv", "gp_items_dl")
     with col2:
         # "Most visited" substitute for the (unavailable) venue slide dimension:
         # itemName ranked by itemsViewed, with per-item conversion.
@@ -325,8 +353,7 @@ def guest_portal(cfg):
                                 "ITEMSPURCHASED": "Purchased"})
         mv["Conversion"] = (conv * 100).round(1).astype(str) + "%"
         st.dataframe(mv, use_container_width=True, hide_index=True)
-        st.download_button("Download most-visited as CSV", data=_csv(mv),
-                           file_name="most_visited_experiences.csv", mime="text/csv")
+        _dl(mv, "most_visited_experiences.csv", "gp_mv_dl", label="⬇ Download most-visited (CSV)")
 
 
 def audience(cfg):
@@ -362,18 +389,24 @@ def audience(cfg):
     c[4].metric("Bounce Rate", f"{((sessions - engaged) / sessions if sessions else 0):.1%}")
 
     st.subheader("Users over time")
-    st.line_chart(daily.groupby(daily["DATE"].dt.date)[["TOTALUSERS", "NEWUSERS"]].sum()
-                       .rename(columns={"TOTALUSERS": "Total Users", "NEWUSERS": "New Users"}))
+    users_ts = (daily.groupby(daily["DATE"].dt.date)[["TOTALUSERS", "NEWUSERS"]].sum()
+                     .rename(columns={"TOTALUSERS": "Total Users", "NEWUSERS": "New Users"}))
+    st.line_chart(users_ts)
+    _dl(users_ts.reset_index(), "audience_users.csv", "aud_users_dl")
 
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("Device category")
-        st.bar_chart(device.groupby("DEVICECATEGORY")["SESSIONS"].sum()
-                           .sort_values(ascending=False).rename("Sessions"))
+        dev = (device.groupby("DEVICECATEGORY")["SESSIONS"].sum()
+                     .sort_values(ascending=False).rename("Sessions"))
+        st.bar_chart(dev)
+        _dl(dev.reset_index(), "audience_device.csv", "aud_device_dl")
     with col2:
         st.subheader("Acquisition — session source")
-        st.bar_chart(daily.groupby("SESSIONSOURCE")["SESSIONS"].sum()
-                          .sort_values(ascending=False).head(10).rename("Sessions"))
+        acq = (daily.groupby("SESSIONSOURCE")["SESSIONS"].sum()
+                    .sort_values(ascending=False).head(10).rename("Sessions"))
+        st.bar_chart(acq)
+        _dl(acq.reset_index(), "audience_acquisition.csv", "aud_acq_dl")
 
     st.subheader("Top locations")
     loc = location[location["CITY"].fillna("") != "Morelia"]
@@ -381,8 +414,7 @@ def audience(cfg):
                   .sort_values("SESSIONS", ascending=False).head(20)
                   .rename(columns={"CITY": "City", "COUNTRY": "Country", "SESSIONS": "Sessions"}))
     st.dataframe(top_loc, use_container_width=True, hide_index=True)
-    st.download_button("Download locations as CSV", data=_csv(top_loc),
-                       file_name="ga4_locations.csv", mime="text/csv")
+    _dl(top_loc, "ga4_locations.csv", "aud_loc_dl", label="⬇ Download locations (CSV)")
 
 
 # Page-key -> render(cfg). Referenced by tenants.py page sets + Main.py router.

@@ -64,7 +64,7 @@ flowchart LR
 | `Main.py` | Entrypoint/router: login → resolve customer → build that customer's `st.navigation` page set |
 | `auth.py` | `require_login()` + set/change password (bcrypt → Snowflake) + `resolve_tenant(email)` |
 | `tenants.py` | Loads the tenant registry from Snowflake `DASHBOARD_CUSTOMERS` (in-code fallback for local dev) |
-| `views.py` | Generic, tenant-parameterized dashboards — page keys `product_performance`, `book_date`, `event_date`, `email_campaigns`, `guest_portal`, `audience` |
+| `views.py` | Generic, tenant-parameterized dashboards — page keys `product_performance`, `book_date`, `event_date`, `email_campaigns`, `guest_portal`, `audience`. Every table and chart exposes a per-widget **CSV download** (via the `_dl()` helper) |
 | `sf_session.py` | Snowflake Snowpark session (key-pair / JWT auth) |
 | `scripts/create_user.py` | Hash a password (bcrypt) + print the `DASHBOARD_USERS` INSERT |
 | `requirements.txt` | Pinned, verified dependency set (Streamlit 1.58 + streamlit-authenticator 0.4.2) |
