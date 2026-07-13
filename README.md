@@ -64,7 +64,7 @@ flowchart LR
 | `Main.py` | Entrypoint/router: login → resolve customer → build that customer's `st.navigation` page set |
 | `auth.py` | `require_login()` + set/change password (bcrypt → Snowflake) + `resolve_tenant(email)` |
 | `tenants.py` | Loads the tenant registry from Snowflake `DASHBOARD_CUSTOMERS` (in-code fallback for local dev) |
-| `views.py` | Generic, tenant-parameterized dashboards (`product_performance`, `attendance`, `email_campaigns`) |
+| `views.py` | Generic, tenant-parameterized dashboards — page keys `product_performance`, `book_date`, `event_date`, `email_campaigns`, `guest_portal`, `audience` |
 | `sf_session.py` | Snowflake Snowpark session (key-pair / JWT auth) |
 | `scripts/create_user.py` | Hash a password (bcrypt) + print the `DASHBOARD_USERS` INSERT |
 | `requirements.txt` | Pinned, verified dependency set (Streamlit 1.58 + streamlit-authenticator 0.4.2) |
@@ -79,9 +79,16 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the login sequence, data-
 | Layer | Answers | Where it lives | Changes |
 |-------|---------|----------------|---------|
 | **Users / permissions** | *Who is this user (password), and which customer?* | Snowflake `DASHBOARD_USERS(EMAIL, NAME, PASSWORD_HASH, CUSTOMER, INVITE_CODE, ACTIVE)` | Often (clients added/removed) |
-| **Template + data source** | *What does that customer see, and from which tables?* | Snowflake `DASHBOARD_CUSTOMERS(CUSTOMER, LABEL, PREFIX, PAGES, EMAIL_CONFIG)` | In Snowflake |
+| **Template + data source** | *What does that customer see, from which tables, and (for GA4 pages) which GA connector views?* | Snowflake `DASHBOARD_CUSTOMERS(CUSTOMER, LABEL, PREFIX, PAGES, EMAIL_CONFIG, GA4_CONFIG)` | In Snowflake |
 
-Both control tables live in Snowflake, so adding/re-pointing a customer is inserts/updates — **no code deploy** (only brand-new *page types* need code).
+`DASHBOARD_CUSTOMERS` is a **registry — one independent row per property**. Each row is
+self-contained (its own `PREFIX`, `PAGES`, `EMAIL_CONFIG`, `GA4_CONFIG`); properties share
+nothing but the table. Both control tables live in Snowflake, so adding/re-pointing a
+customer is inserts/updates — **no code deploy** (only brand-new *page types* need code).
+
+> **Current state:** both control tables exist but are empty, so the app serves an in-code
+> fallback (Abbaye + Rimrock) until they're seeded — see
+> [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#setup-state--seeding).
 
 **Per-customer templates** are pure config. Example — Abbaye vs Rimrock use the *same* email code with different config:
 
@@ -90,7 +97,7 @@ Both control tables live in Snowflake, so adding/re-pointing a customer is inser
 
 Customers can also have **different page sets**. For a genuinely bespoke customer, a page key can point at a custom function in `views.py`.
 
-**Guest Portal & Audience (GA4):** these two pages are sourced from **Google Analytics (GA4)** — pulled via the Snowflake Connector for Google Analytics into a per-client `{PREFIX}_GA4` table (one connector report per grain, unioned). Data model is fully specified in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#4-data-model); these pages are pending connector setup (and the Most Clicked Slides dimension) and will render **with charts** to match Data Studio.
+**Guest Portal & Audience (GA4):** these two pages are sourced from **Google Analytics (GA4)** via the Snowflake Connector for Google Analytics — one report per grain, each landing as a `{report}_GA4_{GRAIN}` view in the connector's destination schema. The app reads those per-grain views directly (location + report base configured in `DASHBOARD_CUSTOMERS.GA4_CONFIG`) and renders **with charts** to match Data Studio. Built and live for Abbaye. The Data Studio "Most Clicked Slides" widget needed a venue custom dimension the connector doesn't expose, so "Most Visited Experiences" substitutes `itemName` ranked by `itemsViewed`. Data model: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#4-data-model).
 
 ### Data-isolation guarantees
 - The customer is resolved **server-side from the authenticated email only** — never from URL params or UI controls.
@@ -110,8 +117,8 @@ flowchart TD
     D --> F[User sets password on first login -> sees dashboards]
 ```
 
-1. **Confirm data** — the customer's `PREFIX_*` tables exist in `SALES_ANALYTICS.PUBLIC`.
-2. **Register the customer** — `INSERT` into `DASHBOARD_CUSTOMERS` (prefix, pages, email config).
+1. **Confirm data** — the customer's `PREFIX_*` tables exist in `SALES_ANALYTICS.PUBLIC`; for the GA4 pages, its GA connector views exist (`{report}_GA4_*`).
+2. **Register the customer** — `INSERT` one row into `DASHBOARD_CUSTOMERS` (prefix, pages, email config, and `GA4_CONFIG` if it has Guest Portal / Audience).
 3. **Add users** — `INSERT` into `DASHBOARD_USERS` (email + customer, optional invite code). Each user sets their own password on first login (or use `scripts/create_user.py` to pre-hash one).
 4. **No code deploy** — it's all data. (A brand-new *page type* is the only thing that needs code.)
 

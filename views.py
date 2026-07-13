@@ -207,10 +207,190 @@ def email_campaigns(cfg):
         st.dataframe(df.groupby("DATA_OPENS").size().reset_index(name="Total"), use_container_width=True)
 
 
+# ---------------------------------------------------------------- GA4: Guest Portal + Audience
+# These two pages come from GA4 via the Snowflake Connector for Google Analytics
+# (aggregate), which writes one view per grain into its own database/schema.
+# cfg["ga4"] points at that location + the per-client report base, e.g.
+# ABBAYE_PARIS -> ABBAYE_PARIS_GA4_DAILY / _EVENTS / _ITEMS / _DEVICE / _LOCATION / _SLIDES.
+# Unlike the other pages these render with charts, to match the Data Studio report.
+
+# Some connector "metrics" arrive as VARCHAR (keyEvents, userEngagementDuration) — coerce.
+_GA4_NUMERIC = ("SESSIONS", "ACTIVEUSERS", "TOTALUSERS", "NEWUSERS", "SCREENPAGEVIEWS",
+                "ENGAGEDSESSIONS", "USERENGAGEMENTDURATION", "KEYEVENTS", "EVENTCOUNT",
+                "ITEMSVIEWED", "ITEMSPURCHASED")
+
+# sessionSource fragments excluded from every GA4 widget (QA / internal traffic),
+# per the Data Studio report's filters.
+_GA4_SOURCE_EXCLUDE = ("tagassistant", "uat", "localhost", "staging", "atlassian", "office.net")
+
+# Guest Portal conversion funnel (ordered); labels shown on the chart.
+_GA4_FUNNEL = [
+    ("guest_portal_loaded", "Guest Portal Loaded"), ("view_item", "Viewed Item"),
+    ("select_item", "Selected Item"), ("add_to_cart", "Add to Cart"),
+    ("init_checkoutpay", "Checkout"), ("purchase", "Purchase"),
+]
+
+
+@st.cache_data(ttl=3600)
+def _load_ga4(fq):
+    return get_session().sql(f"SELECT * FROM {fq}").to_pandas()
+
+
+def _ga4_grain(cfg, grain):
+    g = cfg["ga4"]
+    df = _load_ga4(f'{g["database"]}.{g["schema"]}.{g["report"]}_GA4_{grain}').copy()
+    if "DATE" in df.columns:
+        df["DATE"] = pd.to_datetime(df["DATE"], errors="coerce")
+    for c in _GA4_NUMERIC:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+    return df
+
+
+def _ga4_clean(df):
+    """Apply the shared Data Studio traffic filters (host allow, source excludes)."""
+    if "HOSTNAME" in df.columns:
+        df = df[df["HOSTNAME"].fillna("").str.contains("booketing", case=False)]
+    if "SESSIONSOURCE" in df.columns:
+        src = df["SESSIONSOURCE"].fillna("").str.lower()
+        df = df[~src.str.contains("|".join(_GA4_SOURCE_EXCLUDE))]
+    return df
+
+
+def _ga4_date_range(df):
+    dmin, dmax = df["DATE"].min().date(), df["DATE"].max().date()
+    dr = st.sidebar.date_input("Select date range", [dmin, dmax])
+    return dr if len(dr) == 2 else (dmin, dmax)
+
+
+def _ga4_apply_range(df, dr):
+    return df[(df["DATE"] >= pd.to_datetime(dr[0])) & (df["DATE"] <= pd.to_datetime(dr[1]))]
+
+
+def guest_portal(cfg):
+    st.title("🏨 Guest Portal")
+    if not cfg.get("ga4"):
+        st.info("GA4 data isn't configured for this customer yet.")
+        return
+    try:
+        daily = _ga4_clean(_ga4_grain(cfg, "DAILY"))
+        events = _ga4_clean(_ga4_grain(cfg, "EVENTS"))
+        items = _ga4_grain(cfg, "ITEMS")
+    except Exception:
+        st.error("Unable to load data right now. Please try again later.")
+        return
+    if daily.empty:
+        st.info("No GA4 data for this customer yet.")
+        return
+
+    dr = _ga4_date_range(daily)
+    daily, events = _ga4_apply_range(daily, dr), _ga4_apply_range(events, dr)
+    items = _ga4_apply_range(items, dr)
+
+    sessions = daily["SESSIONS"].sum()
+    key_events = daily["KEYEVENTS"].sum()
+    engaged = daily["ENGAGEDSESSIONS"].sum()
+    eng_dur = daily["USERENGAGEMENTDURATION"].sum()
+    c = st.columns(5)
+    c[0].metric("Sessions", f"{int(sessions):,}")
+    c[1].metric("Key Events", f"{int(key_events):,}")
+    c[2].metric("Conversion Rate", f"{(key_events / sessions if sessions else 0):.2%}")
+    c[3].metric("Engaged Sessions", f"{int(engaged):,}")
+    c[4].metric("Avg Engagement", f"{(eng_dur / sessions if sessions else 0):.0f}s")
+
+    st.subheader("Sessions over time")
+    st.line_chart(daily.groupby(daily["DATE"].dt.date)["SESSIONS"].sum().rename("Sessions"))
+
+    st.subheader("Conversion funnel")
+    totals = events.groupby("EVENTNAME")["EVENTCOUNT"].sum()
+    funnel = pd.DataFrame({"Step": [lbl for _, lbl in _GA4_FUNNEL],
+                           "Events": [int(totals.get(k, 0)) for k, _ in _GA4_FUNNEL]})
+    st.bar_chart(funnel.set_index("Step"))
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Items — viewed vs purchased")
+        top = (items.groupby("ITEMNAME")[["ITEMSVIEWED", "ITEMSPURCHASED"]].sum()
+                    .sort_values("ITEMSVIEWED", ascending=False).head(15))
+        top.columns = ["Viewed", "Purchased"]
+        st.bar_chart(top)
+    with col2:
+        # "Most visited" substitute for the (unavailable) venue slide dimension:
+        # itemName ranked by itemsViewed, with per-item conversion.
+        st.subheader("Most Visited Experiences")
+        mv = (items.groupby("ITEMNAME")[["ITEMSVIEWED", "ITEMSPURCHASED"]].sum()
+                   .sort_values("ITEMSVIEWED", ascending=False).head(20).reset_index())
+        conv = (mv["ITEMSPURCHASED"] / mv["ITEMSVIEWED"].replace(0, pd.NA)).fillna(0)
+        mv = mv.rename(columns={"ITEMNAME": "Experience", "ITEMSVIEWED": "Views",
+                                "ITEMSPURCHASED": "Purchased"})
+        mv["Conversion"] = (conv * 100).round(1).astype(str) + "%"
+        st.dataframe(mv, use_container_width=True, hide_index=True)
+        st.download_button("Download most-visited as CSV", data=_csv(mv),
+                           file_name="most_visited_experiences.csv", mime="text/csv")
+
+
+def audience(cfg):
+    st.title("👥 Audience")
+    if not cfg.get("ga4"):
+        st.info("GA4 data isn't configured for this customer yet.")
+        return
+    try:
+        daily = _ga4_clean(_ga4_grain(cfg, "DAILY"))
+        device = _ga4_clean(_ga4_grain(cfg, "DEVICE"))
+        location = _ga4_clean(_ga4_grain(cfg, "LOCATION"))
+    except Exception:
+        st.error("Unable to load data right now. Please try again later.")
+        return
+    if daily.empty:
+        st.info("No GA4 data for this customer yet.")
+        return
+
+    dr = _ga4_date_range(daily)
+    daily = _ga4_apply_range(daily, dr)
+    device = _ga4_apply_range(device, dr)
+    location = _ga4_apply_range(location, dr)
+
+    total_users = daily["TOTALUSERS"].sum()
+    new_users = daily["NEWUSERS"].sum()
+    sessions = daily["SESSIONS"].sum()
+    engaged = daily["ENGAGEDSESSIONS"].sum()
+    c = st.columns(5)
+    c[0].metric("Total Users", f"{int(total_users):,}")
+    c[1].metric("New Users", f"{int(new_users):,}")
+    c[2].metric("% New Users", f"{(new_users / total_users if total_users else 0):.1%}")
+    c[3].metric("Sessions / User", f"{(sessions / total_users if total_users else 0):.2f}")
+    c[4].metric("Bounce Rate", f"{((sessions - engaged) / sessions if sessions else 0):.1%}")
+
+    st.subheader("Users over time")
+    st.line_chart(daily.groupby(daily["DATE"].dt.date)[["TOTALUSERS", "NEWUSERS"]].sum()
+                       .rename(columns={"TOTALUSERS": "Total Users", "NEWUSERS": "New Users"}))
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Device category")
+        st.bar_chart(device.groupby("DEVICECATEGORY")["SESSIONS"].sum()
+                           .sort_values(ascending=False).rename("Sessions"))
+    with col2:
+        st.subheader("Acquisition — session source")
+        st.bar_chart(daily.groupby("SESSIONSOURCE")["SESSIONS"].sum()
+                          .sort_values(ascending=False).head(10).rename("Sessions"))
+
+    st.subheader("Top locations")
+    loc = location[location["CITY"].fillna("") != "Morelia"]
+    top_loc = (loc.groupby(["CITY", "COUNTRY"])["SESSIONS"].sum().reset_index()
+                  .sort_values("SESSIONS", ascending=False).head(20)
+                  .rename(columns={"CITY": "City", "COUNTRY": "Country", "SESSIONS": "Sessions"}))
+    st.dataframe(top_loc, use_container_width=True, hide_index=True)
+    st.download_button("Download locations as CSV", data=_csv(top_loc),
+                       file_name="ga4_locations.csv", mime="text/csv")
+
+
 # Page-key -> render(cfg). Referenced by tenants.py page sets + Main.py router.
 PAGES = {
     "product_performance": product_performance,
     "book_date": lambda cfg: attendance(cfg, "T_TRANSDATE", "Book Date"),
     "event_date": lambda cfg: attendance(cfg, "TI_CALDATE", "Event Date"),
     "email_campaigns": email_campaigns,
+    "guest_portal": guest_portal,
+    "audience": audience,
 }

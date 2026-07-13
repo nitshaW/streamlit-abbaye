@@ -105,8 +105,12 @@ the customer's code (`ABBAYE_`, `RIMROCK_`, `FAIRMONT_`, `CLL_`, `WHISTLER_`, `J
 | `_REPORT_ITEMS` | Product Performance (views, conversion, attendance, value) |
 | `_UVE_TRANSACTIONS_GROUPED` | Book Date (`T_TRANSDATE`) & Event Date (`TI_CALDATE`) |
 | `_MANDRILL_NOTIFICATIONS` / `_MANDRILL_NOTIFICATION_VIEW` | Email Campaigns |
+| `{report}_GA4_{DAILY,EVENTS,ITEMS,DEVICE,LOCATION,SLIDES}` (GA connector schema) | Guest Portal & Audience — see below |
 
-Two control tables drive the whole app (create both):
+Two control tables in `SALES_ANALYTICS.PUBLIC` drive the whole app. **Both already exist**
+but are **currently empty** — while empty (or unavailable), the app runs on an in-code
+fallback registry (see [Setup state & seeding](#setup-state--seeding)). DDL shown for
+reference / rebuilds:
 
 ### `DASHBOARD_USERS` — who logs in, and which customer
 ```sql
@@ -129,13 +133,33 @@ CREATE TABLE IF NOT EXISTS SALES_ANALYTICS.PUBLIC.DASHBOARD_CUSTOMERS (
     PREFIX       VARCHAR NOT NULL,    -- data source -> PREFIX_REPORT_ITEMS, PREFIX_UVE_TRANSACTIONS_GROUPED
     PAGES        ARRAY,               -- which dashboards this customer sees
     EMAIL_CONFIG VARIANT,             -- per-customer Email Campaigns template (table, tag/subject fields, buckets)
+    GA4_CONFIG   VARIANT,             -- Guest Portal + Audience: GA connector view location {database, schema, report}
     ACTIVE       BOOLEAN DEFAULT TRUE
 );
 ```
 
+`DASHBOARD_CUSTOMERS` is a **registry: one independent row per property**. Each row is
+self-contained (its own `PREFIX`, `PAGES`, `EMAIL_CONFIG`, `GA4_CONFIG`) — properties share
+nothing but the table. Onboarding a new property is a single `INSERT`, no code change.
+
 `tenants.py` loads `DASHBOARD_CUSTOMERS` at runtime (cached, 5 min) and falls back to a
-small in-code registry only if the table is unavailable (local dev). `auth.py` loads
-`DASHBOARD_USERS`.
+small in-code registry if the table is **unavailable or empty** (local dev, or before
+seeding). `auth.py` loads `DASHBOARD_USERS`.
+
+### Setup state & seeding
+
+Current state (2026-07-13): both control tables exist in `SALES_ANALYTICS.PUBLIC` but are
+**empty**, so the app is serving the in-code fallback (Abbaye + Rimrock). `DASHBOARD_CUSTOMERS`
+was created before `GA4_CONFIG` existed and has since been altered to add it:
+
+```sql
+ALTER TABLE SALES_ANALYTICS.PUBLIC.DASHBOARD_CUSTOMERS ADD COLUMN IF NOT EXISTS GA4_CONFIG VARIANT;
+```
+
+To move off the fallback onto Snowflake-driven config, seed one row per property (see
+[`sql/01_control_tables.sql`](../sql/01_control_tables.sql)). Abbaye's row carries its
+`GA4_CONFIG` pointer; a property with no GA4 (e.g. Rimrock) leaves it `NULL` and simply
+omits the `guest_portal` / `audience` page keys.
 
 ### Password lifecycle (all write bcrypt hashes back to `DASHBOARD_USERS.PASSWORD_HASH`)
 - **Set (first login):** admin inserts a user with `PASSWORD_HASH` NULL (+ optional
@@ -147,67 +171,70 @@ small in-code registry only if the table is unavailable (local dev). `auth.py` l
 
 `scripts/create_user.py` remains available to pre-hash a password for a direct INSERT.
 
-### GA4 data — Guest Portal & Audience (`{PREFIX}_GA4`)
+### GA4 data — Guest Portal & Audience
 
 Guest Portal and Audience are sourced from **GA4 via the Snowflake Connector for Google
 Analytics** (aggregate). GA4's scope rules forbid mixing item-, event-, session-, and
-geo-scoped fields in one report, so the connector pulls **one report per grain** (each its
-own table), which are unioned into a single per-client `{PREFIX}_GA4` table tagged by
-`REPORT`.
+geo-scoped fields in one report, so the connector pulls **one report per grain**. Each
+report lands as its **own view** in the connector's destination schema —
+`GOOGLE_ANALYTICS_AGGREGATE_DATA_DEST_DB.GOOGLE_ANALYTICS_AGGREGATE_DATA_DEST_SCHEMA` —
+named `{report}_GA4_{GRAIN}` (e.g. `ABBAYE_PARIS_GA4_DAILY`). The app reads these
+**per-grain views directly** (no union table needed); `views.py` joins/aggregates them
+per widget in pandas.
 
-Connector reports (per client):
+Connector reports / views (per client):
 
-| `REPORT` | Dimensions | Metrics | Powers |
+| Grain (view suffix) | Dimensions | Metrics | Powers |
 |---|---|---|---|
-| `items` | date, itemName | itemsViewed, itemsPurchased | Items Viewed / Purchased |
-| `events` | date, eventName, sessionSource, hostName | sessions, eventCount, keyEvents | Funnel, Transactions, Conversion Rate |
-| `daily` | date, sessionSource, hostName | sessions, activeUsers, totalUsers, newUsers, screenPageViews, engagedSessions, userEngagementDuration, keyEvents | Acquisition, Behavior, Sessions graph |
-| `device` | date, deviceCategory, hostName | sessions | Device Category |
-| `location` | date, city, country, region, sessionSource, hostName | sessions, keyEvents | Location |
-| `slides`* | date, eventName, linkUrl, linkText | eventCount | Most Clicked Slides |
+| `_GA4_ITEMS` | date, itemName | itemsViewed, itemsPurchased | Items Viewed / Purchased **+ Most Visited Experiences** |
+| `_GA4_EVENTS` | date, eventName, sessionSource, hostName | sessions, eventCount, keyEvents | Funnel, Transactions |
+| `_GA4_DAILY` | date, sessionSource, hostName | sessions, activeUsers, totalUsers, newUsers, screenPageViews, engagedSessions, userEngagementDuration, keyEvents | KPIs, Acquisition, Sessions/Users graphs, Conversion Rate |
+| `_GA4_DEVICE` | date, deviceCategory, hostName | sessions | Device Category |
+| `_GA4_LOCATION` | date, city, country, region, sessionSource, hostName | sessions, keyEvents | Top Locations |
+| `_GA4_SLIDES`* | date, eventName, linkUrl, linkText | eventCount | *(not currently consumed — see note)* |
 
-`itemName` is item-scoped, so the `items` report can't carry `sessionSource`/`hostName` —
-filter it via the connector's Filters option instead. All other reports carry the filter
-dimensions so the app can apply each widget's (differing) filters in-query.
+`itemName` is item-scoped, so the `_GA4_ITEMS` view can't carry `sessionSource`/`hostName`.
+`keyEvents` and `userEngagementDuration` arrive as **VARCHAR** and are coerced to numeric in
+the app. Conversion Rate uses `_GA4_DAILY.keyEvents` (the `_GA4_EVENTS` keyEvents column is 0).
 
-Union table (REPORT-tagged long table; each row fills only its report's columns):
+Each customer's GA4 location + report base is configured, not hard-coded, in
+`DASHBOARD_CUSTOMERS.GA4_CONFIG` (VARIANT), with an in-code fallback for local dev:
 
-```sql
-CREATE TABLE IF NOT EXISTS SALES_ANALYTICS.PUBLIC.{PREFIX}_GA4 (
-    REPORT VARCHAR NOT NULL,                         -- items|events|daily|device|location|slides
-    DATE DATE,
-    ITEM_NAME VARCHAR, EVENT_NAME VARCHAR, DEVICE_CATEGORY VARCHAR,
-    CITY VARCHAR, COUNTRY VARCHAR, REGION VARCHAR,
-    LINK_URL VARCHAR, LINK_TEXT VARCHAR,             -- Most Clicked Slides (proxy for the venue)
-    SESSION_SOURCE VARCHAR, HOST_NAME VARCHAR,       -- filter dimensions
-    SESSIONS NUMBER, KEY_EVENTS NUMBER, ITEMS_VIEWED NUMBER, ITEMS_PURCHASED NUMBER,
-    EVENT_COUNT NUMBER, ACTIVE_USERS NUMBER, TOTAL_USERS NUMBER, NEW_USERS NUMBER,
-    SCREEN_PAGE_VIEWS NUMBER, ENGAGED_SESSIONS NUMBER, USER_ENGAGEMENT_DURATION FLOAT
-);
+```json
+{ "database": "GOOGLE_ANALYTICS_AGGREGATE_DATA_DEST_DB",
+  "schema":   "GOOGLE_ANALYTICS_AGGREGATE_DATA_DEST_SCHEMA",
+  "report":   "ABBAYE_PARIS" }
 ```
 
-Filters (Exclude `sessionSource` contains tagassistant/uat/localhost/staging; Include
-`hostName` contains `booketing`; `location` also excludes `city = Morelia`; `device` uses
-the host filter only; `events` funnel filters `eventName` to the 5 funnel steps; `slides`
-filters `eventName` to `explore_slider_click`/`explore_sliders_externallink`).
+Filters applied in-app (from the Data Studio report): exclude `sessionSource` containing
+tagassistant/uat/localhost/staging (also internal `atlassian`/`office.net` traffic); require
+`hostName` contains `booketing`; `location` excludes `city = Morelia`. Guest Portal builds an
+ordered event funnel (Guest Portal Loaded → Viewed → Selected → Add to Cart → Checkout →
+Purchase).
 
-Ratios are **computed in the app**, not stored: Conversion Rate = `KEY_EVENTS/SESSIONS`;
-% New Users = `(TOTAL_USERS-NEW_USERS)/TOTAL_USERS`; Bounce Rate =
-`(SESSIONS-ENGAGED_SESSIONS)/SESSIONS`; Avg engagement = `USER_ENGAGEMENT_DURATION/SESSIONS`;
-Sessions per user = `SESSIONS/TOTAL_USERS`.
+Ratios are **computed in the app**, not stored: Conversion Rate = `keyEvents/sessions`;
+% New Users = `newUsers/totalUsers`; Bounce Rate = `(sessions-engagedSessions)/sessions`;
+Avg engagement = `userEngagementDuration/sessions`; Sessions per user = `sessions/totalUsers`.
 
-\* **Most Clicked Slides is pending a dimension.** The venue breakdown is the custom event
-parameter "get venue selected" (`customEvent:<param>`), which the Snowflake GA connector
-does not expose. `linkUrl`/`linkText` are proxies for the external-link slider event —
-verify in a GA4 Explore that they carry the venue for both slide events, otherwise defer.
+\* **"Most Visited" — substituted with `itemName` / `itemsViewed`.** The original Data Studio
+"Most Clicked Slides" widget breaks down by venue — the custom event parameter "get venue
+selected" (`customEvent:<param>`) — which the Snowflake GA connector does not expose. The
+`_GA4_SLIDES` report was set up to use `linkUrl`/`linkText` as a stand-in, but both came back
+**empty on every row**, and `eventName` only names the *action type* (`view_item`,
+`inventory_list_click`, …), never which item. So Guest Portal's **"Most Visited Experiences"**
+widget uses `_GA4_ITEMS` — `itemName` ranked by `itemsViewed` (with per-item conversion) —
+which is the actual per-content view count (e.g. `view_item` eventCount = total itemsViewed).
+The `_GA4_SLIDES` grain is **not currently consumed**; revisit it only if/when the venue
+custom dimension is added to the connector report.
 
 ---
 
 ## 5. Roadmap
 
-- **Guest Portal** and **Audience** pages — data model defined above (GA4 via the Snowflake
-  Connector for Google Analytics → per-client `{PREFIX}_GA4`). Pending: create the per-grain
-  connector reports + the union view, resolve the Most Clicked Slides dimension, then add
-  the `guest_portal` + `audience` page keys to `views.py`/`tenants.py` (**charts on** for
-  these two, to match Data Studio).
+- **Guest Portal** and **Audience** pages — ✅ **built** (`views.guest_portal` /
+  `views.audience`, charts on, reading the per-grain GA4 connector views via
+  `DASHBOARD_CUSTOMERS.GA4_CONFIG`). "Most Visited" uses `itemName`/`itemsViewed` as the venue
+  substitute. Optional GA4 follow-up: add the venue custom dimension ("get venue selected") to
+  the slides report for a true per-venue breakdown, and roll GA4 out to other clients (add each
+  client's connector reports + a `GA4_CONFIG` row).
 - `Dockerfile` on the GCP `base:v1.0` image, then hand off to INF-212 for hosting.
