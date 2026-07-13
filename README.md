@@ -87,8 +87,8 @@ nothing but the table. Both control tables live in Snowflake, so adding/re-point
 customer is inserts/updates — **no code deploy** (only brand-new *page types* need code).
 
 > **Current state:** `DASHBOARD_CUSTOMERS` is **seeded with the Abbaye row** (GA4 config
-> included), so Abbaye now runs from Snowflake config, not the fallback. `DASHBOARD_USERS`
-> is still empty — add user rows to enable login (local dev uses `dev_bypass`). See
+> included) and `DASHBOARD_USERS` has the first admin user, so Abbaye runs fully from
+> Snowflake config. `dev_bypass` is currently off locally (login required). See
 > [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#setup-state--seeding).
 
 **Per-customer templates** are pure config. Example — Abbaye vs Rimrock use the *same* email code with different config:
@@ -140,8 +140,8 @@ For local preview without the login form, set `[access] dev_bypass = true` and
 `dev_tenant = "abbaye"` in `secrets.toml`. **Remove both for any hosted deployment.**
 
 > Requires Python 3.11. Run via `python -m streamlit …` (not the `streamlit` console
-> script). Keep **cryptography==42.0.8** pinned — it must stay `<43` for
-> `snowflake-connector-python`.
+> script). **cryptography** must stay **`<43`** (pinned as a range) — required by
+> `snowflake-connector-python` 3.x.
 
 ---
 
@@ -203,7 +203,10 @@ docker push us-central1-docker.pkg.dev/urvenue-social/urvenue-streamlit/analytic
 | key at `/run/secrets/rsa_key.p8` (or `SNOWFLAKE_PRIVATE_KEY_PATH`); `SNOWFLAKE_PRIVATE_KEY_PASSPHRASE` if encrypted | `private_key_file` (+ optional `private_key_passphrase`) |
 | `COOKIE_KEY` (+ optional `COOKIE_NAME`/`COOKIE_EXPIRY_DAYS`) | `[cookie]` section |
 
+> **Role:** local dev connects as `SVC_REPORTS` / **`ACCOUNTADMIN`** (via `secrets.toml`).
 > The role/warehouse/database must be able to read `SALES_ANALYTICS.PUBLIC` and the GA4
-> connector schema. INF-200's base default (`urvenue_role` / `streamlit_xs` / `dba`) does
-> **not** — set these explicitly to the dashboard's Snowflake objects.
+> connector schema — INF-200's base default (`urvenue_role` / `streamlit_xs` / `dba`) does
+> **not**. For production use a least-privilege role (grants in
+> [ARCHITECTURE §4](docs/ARCHITECTURE.md#snowflake-role--privileges)) set via `SNOWFLAKE_ROLE`,
+> not `ACCOUNTADMIN`.
 > In production do **not** set `dev_bypass` — login is required.

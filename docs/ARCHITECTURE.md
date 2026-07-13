@@ -160,8 +160,9 @@ seeding). `auth.py` loads `DASHBOARD_USERS`.
 Current state (2026-07-13): both control tables exist in `SALES_ANALYTICS.PUBLIC`.
 `DASHBOARD_CUSTOMERS` is **seeded with the Abbaye row** (PAGES incl. `guest_portal` /
 `audience`, plus its `GA4_CONFIG`), so Abbaye loads its config from Snowflake — not the
-fallback. `DASHBOARD_USERS` is still **empty**, so add user rows (or use local `dev_bypass`)
-to sign in. The `GA4_CONFIG` column was added after the table was first created:
+fallback. `DASHBOARD_USERS` has the **first admin user** (password unset until first login);
+add more rows to onboard others. `dev_bypass` is currently off locally, so the login form is
+exercised in dev too. The `GA4_CONFIG` column was added after the table was first created:
 
 ```sql
 ALTER TABLE SALES_ANALYTICS.PUBLIC.DASHBOARD_CUSTOMERS ADD COLUMN IF NOT EXISTS GA4_CONFIG VARIANT;
@@ -236,6 +237,20 @@ widget uses `_GA4_ITEMS` — `itemName` ranked by `itemsViewed` (with per-item c
 which is the actual per-content view count (e.g. `view_item` eventCount = total itemsViewed).
 The `_GA4_SLIDES` grain is **not currently consumed**; revisit it only if/when the venue
 custom dimension is added to the connector report.
+
+### Snowflake role & privileges
+
+Local dev connects as `SVC_REPORTS` with **`ACCOUNTADMIN`** (from `secrets.toml`) for
+convenience. Production should use a **least-privilege role** (set via `SNOWFLAKE_ROLE`)
+granted only what the app needs — do **not** ship `ACCOUNTADMIN`:
+
+- `USAGE` on the warehouse, on `SALES_ANALYTICS` + schema `PUBLIC`, and on the GA4 connector
+  DB/schema (`GOOGLE_ANALYTICS_AGGREGATE_DATA_DEST_DB.GOOGLE_ANALYTICS_AGGREGATE_DATA_DEST_SCHEMA`)
+- `SELECT` on the `{PREFIX}_*` data tables, `DASHBOARD_CUSTOMERS`, and the GA4 `_GA4_*` views
+- `SELECT, INSERT, UPDATE` on `DASHBOARD_USERS` (the password set/change write-back)
+
+This is also the clean answer to the INF-200 role question — hand infra a purpose-built role
+rather than `ACCOUNTADMIN` or the base default (`urvenue_role`).
 
 ---
 

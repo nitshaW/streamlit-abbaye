@@ -8,7 +8,7 @@ FROM us-central1-docker.pkg.dev/urvenue-social/urvenue-streamlit/base:v1.0
 WORKDIR /app
 
 # App dependencies on top of the base (Streamlit auth, Snowflake connector/snowpark,
-# bcrypt, and the pinned cryptography==42.0.8). Installing the pinned set from
+# bcrypt, and cryptography <43). Installing the pinned set from
 # requirements.txt guarantees the versions the app was verified against win.
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
