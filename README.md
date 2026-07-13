@@ -167,3 +167,31 @@ credentials are not in secrets** — they're in the Snowflake `DASHBOARD_USERS` 
 The team hosting builds/runs the image and injects `secrets.toml` (or the individual
 values) as a mounted secret — the `.pem` and secrets are never baked into the image.
 No external OAuth provider or callback URL is required.
+
+### Container image
+
+[`Dockerfile`](Dockerfile) builds on the shared Streamlit base image in GCP Artifact
+Registry (`us-central1-docker.pkg.dev/urvenue-social/urvenue-streamlit/base:v1.0`),
+installs the pinned dependencies, and copies the app. Secrets and the key-pair `.pem`
+are **runtime mounts**, never baked in (enforced by [`.dockerignore`](.dockerignore)).
+
+```bash
+# 1. Auth to Artifact Registry (once)
+gcloud auth configure-docker us-central1-docker.pkg.dev
+
+# 2. Build
+docker build -t us-central1-docker.pkg.dev/urvenue-social/urvenue-streamlit/analytics-dashboard:v1.0 .
+
+# 3. Run locally to smoke-test (mount secrets + key at runtime)
+docker run -p 8501:8501 \
+  -v "$PWD/.streamlit/secrets.toml:/app/.streamlit/secrets.toml:ro" \
+  -v "$PWD/svc_reports_key_1.pem:/app/svc_reports_key_1.pem:ro" \
+  us-central1-docker.pkg.dev/urvenue-social/urvenue-streamlit/analytics-dashboard:v1.0
+
+# 4. Push for INF-212 to deploy
+docker push us-central1-docker.pkg.dev/urvenue-social/urvenue-streamlit/analytics-dashboard:v1.0
+```
+
+> In production, mount a `secrets.toml` with `dev_bypass` removed/commented (login required)
+> and the `private_key_file` path pointing at the mounted `.pem` (`svc_reports_key_1.pem`,
+> resolved relative to `/app`).

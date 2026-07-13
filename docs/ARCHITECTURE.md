@@ -243,4 +243,6 @@ custom dimension is added to the connector report.
   substitute. Optional GA4 follow-up: add the venue custom dimension ("get venue selected") to
   the slides report for a true per-venue breakdown, and roll GA4 out to other clients (add each
   client's connector reports + a `GA4_CONFIG` row).
-- `Dockerfile` on the GCP `base:v1.0` image, then hand off to INF-212 for hosting.
+- ✅ `Dockerfile` (+ `.dockerignore`) on the GCP `base:v1.0` image — installs pinned deps,
+  copies the app, keeps secrets/`.pem` as runtime mounts. Build/push commands in the README
+  ([Deployment → Container image](../README.md#container-image)); hosting is INF-212.

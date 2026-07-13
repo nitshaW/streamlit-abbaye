@@ -1,0 +1,22 @@
+# --- NEVER ship secrets or keys (belt-and-suspenders; the Dockerfile COPYs explicitly) ---
+.streamlit/secrets.toml
+*.pem
+
+# Local env / caches
+venv/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# VCS / tooling
+.git/
+.gitignore
+.claude/
+.spec-workflow/
+
+# Not needed at runtime
+docs/
+sql/
+pages_pending/
+tests/
+*.md
