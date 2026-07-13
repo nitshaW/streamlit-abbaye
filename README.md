@@ -86,8 +86,9 @@ self-contained (its own `PREFIX`, `PAGES`, `EMAIL_CONFIG`, `GA4_CONFIG`); proper
 nothing but the table. Both control tables live in Snowflake, so adding/re-pointing a
 customer is inserts/updates — **no code deploy** (only brand-new *page types* need code).
 
-> **Current state:** both control tables exist but are empty, so the app serves an in-code
-> fallback (Abbaye + Rimrock) until they're seeded — see
+> **Current state:** `DASHBOARD_CUSTOMERS` is **seeded with the Abbaye row** (GA4 config
+> included), so Abbaye now runs from Snowflake config, not the fallback. `DASHBOARD_USERS`
+> is still empty — add user rows to enable login (local dev uses `dev_bypass`). See
 > [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#setup-state--seeding).
 
 **Per-customer templates** are pure config. Example — Abbaye vs Rimrock use the *same* email code with different config:

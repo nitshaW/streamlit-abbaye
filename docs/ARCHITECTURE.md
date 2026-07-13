@@ -148,18 +148,19 @@ seeding). `auth.py` loads `DASHBOARD_USERS`.
 
 ### Setup state & seeding
 
-Current state (2026-07-13): both control tables exist in `SALES_ANALYTICS.PUBLIC` but are
-**empty**, so the app is serving the in-code fallback (Abbaye + Rimrock). `DASHBOARD_CUSTOMERS`
-was created before `GA4_CONFIG` existed and has since been altered to add it:
+Current state (2026-07-13): both control tables exist in `SALES_ANALYTICS.PUBLIC`.
+`DASHBOARD_CUSTOMERS` is **seeded with the Abbaye row** (PAGES incl. `guest_portal` /
+`audience`, plus its `GA4_CONFIG`), so Abbaye loads its config from Snowflake — not the
+fallback. `DASHBOARD_USERS` is still **empty**, so add user rows (or use local `dev_bypass`)
+to sign in. The `GA4_CONFIG` column was added after the table was first created:
 
 ```sql
 ALTER TABLE SALES_ANALYTICS.PUBLIC.DASHBOARD_CUSTOMERS ADD COLUMN IF NOT EXISTS GA4_CONFIG VARIANT;
 ```
 
-To move off the fallback onto Snowflake-driven config, seed one row per property (see
-[`sql/01_control_tables.sql`](../sql/01_control_tables.sql)). Abbaye's row carries its
-`GA4_CONFIG` pointer; a property with no GA4 (e.g. Rimrock) leaves it `NULL` and simply
-omits the `guest_portal` / `audience` page keys.
+To add another property, insert one more row (see
+[`sql/01_control_tables.sql`](../sql/01_control_tables.sql)). A property with no GA4 leaves
+`GA4_CONFIG` `NULL` and simply omits the `guest_portal` / `audience` page keys.
 
 ### Password lifecycle (all write bcrypt hashes back to `DASHBOARD_USERS.PASSWORD_HASH`)
 - **Set (first login):** admin inserts a user with `PASSWORD_HASH` NULL (+ optional
