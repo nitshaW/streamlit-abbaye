@@ -179,8 +179,10 @@ are **runtime mounts**, never baked in (enforced by [`.dockerignore`](.dockerign
 # 1. Auth to Artifact Registry (once)
 gcloud auth configure-docker us-central1-docker.pkg.dev
 
-# 2. Build
-docker build -t us-central1-docker.pkg.dev/urvenue-social/urvenue-streamlit/analytics-dashboard:v1.0 .
+# 2. Build — ALWAYS target linux/amd64 (the uv-containers server is amd64; Apple
+#    Silicon defaults to arm64, which won't run there). Per INF-200.
+docker build --platform linux/amd64 \
+  -t us-central1-docker.pkg.dev/urvenue-social/urvenue-streamlit/analytics-dashboard:v1.0 .
 
 # 3. Run locally to smoke-test (mount secrets + key at runtime)
 docker run -p 8501:8501 \
@@ -192,6 +194,16 @@ docker run -p 8501:8501 \
 docker push us-central1-docker.pkg.dev/urvenue-social/urvenue-streamlit/analytics-dashboard:v1.0
 ```
 
-> In production, mount a `secrets.toml` with `dev_bypass` removed/commented (login required)
-> and the `private_key_file` path pointing at the mounted `.pem` (`svc_reports_key_1.pem`,
-> resolved relative to `/app`).
+**Credentials at runtime** — `sf_session.py` reads env vars first, then `secrets.toml`
+(env wins), so the same image runs either way. Two options:
+
+| A — INF-200 pattern (env vars + mounted key) | B — mounted `secrets.toml` (local dev) |
+|---|---|
+| `SNOWFLAKE_ACCOUNT/_USER/_ROLE/_WAREHOUSE/_DATABASE/_SCHEMA` | `[snowflake]` section |
+| key at `/run/secrets/rsa_key.p8` (or `SNOWFLAKE_PRIVATE_KEY_PATH`); `SNOWFLAKE_PRIVATE_KEY_PASSPHRASE` if encrypted | `private_key_file` (+ optional `private_key_passphrase`) |
+| `COOKIE_KEY` (+ optional `COOKIE_NAME`/`COOKIE_EXPIRY_DAYS`) | `[cookie]` section |
+
+> The role/warehouse/database must be able to read `SALES_ANALYTICS.PUBLIC` and the GA4
+> connector schema. INF-200's base default (`urvenue_role` / `streamlit_xs` / `dba`) does
+> **not** — set these explicitly to the dashboard's Snowflake objects.
+> In production do **not** set `dev_bypass` — login is required.

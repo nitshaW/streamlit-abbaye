@@ -12,6 +12,8 @@ Flows (all write the new bcrypt hash back to DASHBOARD_USERS.PASSWORD_HASH):
 The customer is resolved server-side from the authenticated email — never from
 URL params or UI input.
 """
+import os
+
 import bcrypt
 import streamlit as st
 import streamlit_authenticator as stauth
@@ -72,15 +74,22 @@ def _write_password(email, new_hash):
     _load_users.clear()
 
 
-def _build_authenticator(creds):
-    ck = st.secrets.get("cookie", {})
-    return stauth.Authenticate(
-        creds,
-        ck.get("name", "urvenue_dashboards"),
-        ck.get("key", "change-me-in-secrets"),
-        float(ck.get("expiry_days", 1)),
-        auto_hash=False,
+def _cookie_cfg():
+    """Session-cookie settings: env vars win, then secrets.toml, then defaults."""
+    try:
+        ck = dict(st.secrets.get("cookie", {}))
+    except Exception:
+        ck = {}
+    return (
+        os.environ.get("COOKIE_NAME") or ck.get("name", "urvenue_dashboards"),
+        os.environ.get("COOKIE_KEY") or ck.get("key", "change-me-in-secrets"),
+        float(os.environ.get("COOKIE_EXPIRY_DAYS") or ck.get("expiry_days", 1)),
     )
+
+
+def _build_authenticator(creds):
+    name, key, expiry = _cookie_cfg()
+    return stauth.Authenticate(creds, name, key, expiry, auto_hash=False)
 
 
 def _set_password_form(users):

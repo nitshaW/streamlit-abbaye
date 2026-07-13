@@ -19,13 +19,23 @@ COPY Main.py auth.py tenants.py views.py sf_session.py ./
 COPY scripts ./scripts
 COPY .streamlit/config.toml ./.streamlit/config.toml
 
-# Runtime-mounted secrets (provided by infra — never in the image):
-#   /app/.streamlit/secrets.toml   [snowflake] [cookie] [access]  (dev_bypass OFF in prod)
-#   /app/svc_reports_key_1.pem     key-pair private key referenced by secrets.toml
-# Example:
-#   docker run -p 8501:8501 \
-#     -v /secure/secrets.toml:/app/.streamlit/secrets.toml:ro \
-#     -v /secure/svc_reports_key_1.pem:/app/svc_reports_key_1.pem:ro  <image>
+# Credentials are provided at runtime — NEVER baked into the image. Two options
+# (env vars win over secrets.toml for any given setting):
+#
+#  A) INF-200 pattern — env vars + a mounted key (matches the shared base):
+#       SNOWFLAKE_ACCOUNT/_USER/_ROLE/_WAREHOUSE/_DATABASE/_SCHEMA
+#       key mounted read-only at /run/secrets/rsa_key.p8
+#         (or SNOWFLAKE_PRIVATE_KEY_PATH; SNOWFLAKE_PRIVATE_KEY_PASSPHRASE if encrypted)
+#       COOKIE_KEY (session-cookie signing secret), optional COOKIE_NAME/COOKIE_EXPIRY_DAYS
+#     docker run -p 8501:8501 --env-file /secure/app.env \
+#       -v /secure/rsa_key.p8:/run/secrets/rsa_key.p8:ro  <image>
+#
+#  B) Mounted secrets.toml (as local dev):
+#     docker run -p 8501:8501 \
+#       -v /secure/secrets.toml:/app/.streamlit/secrets.toml:ro \
+#       -v /secure/svc_reports_key_1.pem:/app/svc_reports_key_1.pem:ro  <image>
+#
+# In production do NOT set dev_bypass — login is required.
 
 EXPOSE 8501
 

@@ -90,6 +90,10 @@ flowchart LR
 - Only `443` (and `80`→`443` redirect) is public; the Streamlit port stays internal.
 - The proxy must support **WebSocket upgrade** and forward `X-Forwarded-Proto`/`Host`.
 - Secrets are **injected at runtime** (mounted file / env), never baked into the image.
+  `sf_session.py`/`auth.py` read **env vars first, then `secrets.toml`** — so the same
+  image runs via the INF-200 env-var pattern (`SNOWFLAKE_*` + key at `/run/secrets/rsa_key.p8`,
+  `COOKIE_KEY`) or via a mounted `secrets.toml`. See the README for the full variable list.
+- Build images for **`linux/amd64`** (the `uv-containers` server arch) — see INF-200.
 - **No external OAuth provider / callback URL** — authentication is entirely in-app
   against Snowflake.
 
